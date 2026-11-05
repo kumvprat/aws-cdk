@@ -1,0 +1,85 @@
+# TEMPORARY fork-only repro — DO NOT merge upstream.
+#
+# Proves the integ-build heap fix from aws/aws-cdk PR #38312 + commit
+# 0f358488c6. The real "Integration Test deployment" workflow cannot run on a
+# fork (it needs the self-hosted CodeBuild deployment-integ runner, the
+# deployment-integ-test environment, and CDK_ATMOSPHERE_* OIDC vars), so this
+# reproduces ONLY the "Build Integration Test packages" step on a
+# GitHub-hosted runner.
+#
+# The `default` matrix leg runs with Node's default ~4 GB heap and is expected
+# to OOM (exit 134, "Last few GCs" block) on framework-integ type-aware eslint.
+# The `raised` leg sets NODE_OPTIONS=--max-old-space-size=8192 (the fix) and is
+# expected to pass.
+#
+# NOTE: ubuntu-latest has ~16 GB RAM / 4 vCPU. lerna may run ~4 package builds
+# in parallel at 8 GB each, which could hit the machine memory limit on the
+# raised leg. If that happens, a faithful-but-safer fallback is to append
+# `--concurrency 2` to the build command. We deliberately do NOT add it here so
+# the test mirrors the upstream command exactly.
+
+name: integ-heap-repro
+
+on:
+  push:
+    branches:
+      - test/integ-heap-repro
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-integ:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        heap: [default, raised]
+    name: Build integ packages (heap=${{ matrix.heap }})
+
+    steps:
+      - name: Checkout HEAD
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "yarn"
+          cache-dependency-path: |
+            yarn.lock
+
+        # Increases vm.max_map_count for memory intensive jobs
+      - name: Configure system settings
+        run: |
+          (command -v sysctl || sudo apt-get update && sudo apt-get install -y procps) && \
+          sudo sysctl -w vm.max_map_count=2251954
+
+      - name: Install dependencies for Integration Tests
+        run: yarn install --frozen-lockfile
+
+      - name: Build deployment-integ
+        run: yarn --cwd tools/@aws-cdk/integration-test-deployment build
+
+      # Build integration test packages: @aws-cdk-testing/framework-integ (stable tests) and @aws-cdk/* (alpha tests)
+      - name: Build Integration Test packages
+        run: npx lerna run build --scope="{@aws-cdk/*,@aws-cdk-testing/framework-integ}"
+        env:
+          # `raised` applies the fix (8 GB heap); `default` keeps Node's default
+          # ~4 GB heap so the OOM reproduces. No --trace-gc, so the default V8
+          # "Last few GCs" block appears on OOM.
+          NODE_OPTIONS: ${{ matrix.heap == 'raised' && '--max-old-space-size=8192' || '' }}
+
+      - name: Report effective heap limit
+        if: always()
+        run: |
+          echo "=== matrix.heap=${{ matrix.heap }} ==="
+          free -g
+          nproc
+          node -e "console.log('heap_size_limit (MiB):', require('v8').getHeapStatistics().heap_size_limit/1048576)"
+        env:
+          NODE_OPTIONS: ${{ matrix.heap == 'raised' && '--max-old-space-size=8192' || '' }}
