@@ -675,6 +675,8 @@ new CfnOutput(this, 'TheUrl', {
 
 Calls to this URL need to be signed with SigV4.
 
+> **Note:** `grantInvokeUrl` puts the principal in a construct ID. In a stack without a concrete `env.account`, a principal built from `this.account`, such as `new iam.AccountPrincipal(this.account)`, makes synth fail with `ID components may not include unresolved tokens`. Use `new iam.AccountRootPrincipal()` or a literal account ID instead.
+
 ### Anonymous Function URLs
 
 To create a Function URL which can be called anonymously, pass `authType: FunctionUrlAuthType.NONE` to `addFunctionUrl()`:
